@@ -29,7 +29,7 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency 'activejob', '>= 6.0'
   spec.add_dependency 'bunny-publisher', '~> 0.2.0'
-  spec.add_dependency 'sneakers', '~> 2.7'
+  spec.add_dependency 'kicks', '~> 3.0'
 
   spec.add_development_dependency 'appraisal', '~> 2.5.0'
   spec.add_development_dependency 'bundler'
