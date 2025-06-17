@@ -66,6 +66,14 @@ module AdvancedSneakersActiveJob
       @delayed_publisher ||= AdvancedSneakersActiveJob::DelayedPublisher.new(**config.publisher_config)
     end
 
+    def shutdown
+      close_publisher(@publisher)
+      @publisher = nil
+
+      close_publisher(@delayed_publisher)
+      @delayed_publisher = nil
+    end
+
     # Based on ActiveSupport::Inflector#parameterize
     def consumer_name(queue_name:)
       # replace accented chars with their ascii equivalents
@@ -87,5 +95,23 @@ module AdvancedSneakersActiveJob
 
       constants.include?(name) ? const_get(name) : super
     end
+
+    private
+
+    def close_publisher(publisher)
+      return unless publisher
+
+      begin
+        publisher.close
+      rescue StandardError => e
+        Rails.logger&.error "Error closing publisher: #{e.message}" if defined?(Rails)
+      end
+    end
   end
+end
+
+# Register shutdown hook to ensure connections are closed properly during process exit
+at_exit do
+  debugger
+  AdvancedSneakersActiveJob.shutdown
 end
