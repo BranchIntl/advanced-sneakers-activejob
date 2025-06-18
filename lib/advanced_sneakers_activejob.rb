@@ -112,6 +112,5 @@ end
 
 # Register shutdown hook to ensure connections are closed properly during process exit
 at_exit do
-  debugger
   AdvancedSneakersActiveJob.shutdown
 end
