@@ -1,12 +1,13 @@
 # frozen_string_literal: true
 
-require 'active_job/base'
+require 'logger'
 
 describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
   let(:publisher) do
     # Skip BunnyPublisher::Base#initialize so unit tests don't need a live broker.
     publisher = described_class.allocate
     publisher.instance_variable_set(:@dlx_exchange_name, 'activejob')
+    allow(publisher).to receive(:logger).and_return(Logger.new(IO::NULL))
     publisher
   end
 
