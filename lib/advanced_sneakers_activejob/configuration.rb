@@ -19,6 +19,10 @@ module AdvancedSneakersActiveJob
     config_accessor(:retry_delay_proc) { ->(count) { AdvancedSneakersActiveJob::EXPONENTIAL_BACKOFF[count] } } # seconds
     config_accessor(:log_level) { :info } # debug logs are too noizy because of Bunny
 
+    # :legacy or :leveled. Accepts a symbol or a callable returning one.
+    # Adapter dispatches per-publish via this value.
+    config_accessor(:delayed_delivery) { :legacy }
+
     config_accessor(:publish_connection)
 
     def republish_connection=(_)
