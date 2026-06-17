@@ -31,8 +31,15 @@ module AdvancedSneakersActiveJob
 
     # Declare the 20-level topology. Idempotent. Call at boot before
     # any worker queue binds to DELIVERY_EXCHANGE.
-    def declare_topology!
-      ch = channel
+    #
+    # Accepts an optional channel override. At boot time the publisher's own
+    # channel may not be open yet (BunnyPublisher::Base opens lazily on first
+    # publish), so host apps should pass in an already-open channel from the
+    # same connection used to declare their other queues.
+    def declare_topology!(channel_override = nil)
+      ch = channel_override || channel
+      raise 'LeveledDelayedPublisher#declare_topology! requires an open channel' if ch.nil?
+
       ch.topic(DELIVERY_EXCHANGE, durable: true)
 
       (0...LEVELS).each do |n|
