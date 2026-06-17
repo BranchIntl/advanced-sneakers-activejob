@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'active_job/base'
+
 describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
   let(:publisher) do
     # Skip BunnyPublisher::Base#initialize so unit tests don't need a live broker.
