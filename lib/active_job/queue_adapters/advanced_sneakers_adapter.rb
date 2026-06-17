@@ -36,15 +36,15 @@ module ActiveJob
         end
 
         # Honors config.delayed_delivery (symbol or callable returning :legacy / :leveled).
-        # Unknown values fall back to :legacy with a warning.
+        # Unknown or non-symbolizable values fall back to :legacy with a warning.
         def select_delayed_publisher
           strategy_value = AdvancedSneakersActiveJob.config.delayed_delivery
           strategy = strategy_value.respond_to?(:call) ? strategy_value.call : strategy_value
 
-          case strategy.to_sym
-          when :leveled
+          case strategy
+          when :leveled, 'leveled'
             AdvancedSneakersActiveJob.leveled_delayed_publisher
-          when :legacy
+          when :legacy, 'legacy'
             AdvancedSneakersActiveJob.delayed_publisher
           else
             ::ActiveJob::Base.logger.warn { "AdvancedSneakersAdapter: unknown delayed_delivery #{strategy.inspect}, using :legacy" }
