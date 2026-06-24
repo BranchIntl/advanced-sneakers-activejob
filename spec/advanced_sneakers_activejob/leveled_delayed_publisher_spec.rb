@@ -5,8 +5,11 @@ require 'logger'
 describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
   let(:publisher) do
     # Skip BunnyPublisher::Base#initialize so unit tests don't need a live broker.
+    # We still need @mutex because the parent's #publish (which our override
+    # delegates to via super) wraps the publish flow in @mutex.synchronize.
     publisher = described_class.allocate
     publisher.instance_variable_set(:@dlx_exchange_name, 'activejob')
+    publisher.instance_variable_set(:@mutex, Mutex.new)
     allow(publisher).to receive(:logger).and_return(Logger.new(IO::NULL))
     publisher
   end
@@ -81,8 +84,29 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
     let(:channel) { instance_double('Bunny::Channel') }
 
     before do
+      # The parent's #publish (invoked via super) calls #ensure_connection!
+      # to lazy-open the connection + channel before touching exchanges. Stub
+      # it so unit tests don't need a live broker.
+      allow(publisher).to receive(:ensure_connection!).and_return(nil)
       allow(publisher).to receive(:channel).and_return(channel)
       allow(channel).to receive(:topic).and_return(exchange)
+    end
+
+    context 'channel lifecycle' do
+      it 'lazy-opens the connection + channel before touching exchanges' do
+        publisher.publish('payload', routing_key: 'q', headers: { 'delay' => 47 })
+
+        expect(publisher).to have_received(:ensure_connection!)
+      end
+
+      it 'lazy-opens before the defensive zero-delay fallback too' do
+        direct_exchange = instance_double('Bunny::Exchange', publish: nil)
+        allow(channel).to receive(:direct).and_return(direct_exchange)
+
+        publisher.publish('payload', routing_key: 'q', headers: { 'delay' => 0 })
+
+        expect(publisher).to have_received(:ensure_connection!)
+      end
     end
 
     context 'when delay exceeds MAX_DELAY' do

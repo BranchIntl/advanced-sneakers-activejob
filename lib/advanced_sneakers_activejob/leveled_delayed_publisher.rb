@@ -6,6 +6,45 @@ module AdvancedSneakersActiveJob
   # 20 quorum queues, one per power-of-2 second interval. A delay of D
   # seconds routes through the levels matching its set bits, summing
   # TTL to D exactly. Pattern follows NServiceBus / Celery.
+  #
+  # Implementation note: parent's publish lifecycle is inherited as-is.
+  # We do NOT override BunnyPublisher::Base#publish. Instead we override
+  # two hooks the parent already exposes:
+  #
+  #   #exchange         - parent reads this once per publish to get the
+  #                       target exchange. We compute the right level
+  #                       exchange (or the direct delivery exchange for
+  #                       delay <= 0) from the current @message_options,
+  #                       which the parent sets inside its own mutex
+  #                       before calling us.
+  #
+  #   #reset_exchange!  - parent calls this from with_errors_handling when
+  #                       a Bunny::ChannelAlreadyClosed forces a channel
+  #                       rebuild. We invalidate our memoized level
+  #                       exchange handles so the retry hits the new
+  #                       channel.
+  #
+  # The only thing we add at the top of #publish is a pre-step: validate
+  # the delay against MAX_DELAY (raises before mutex), and rewrite the
+  # caller's routing_key into the 21-segment binary-decomposed form the
+  # level topic exchanges expect. Then we hand off to super, which runs
+  # the parent's full publish flow (mutex, ensure_connection,
+  # with_errors_handling, callbacks, exchange.publish).
+  #
+  # This inherits, for free:
+  #
+  #   * Bunny-channel thread-safety (@mutex.synchronize wraps everything).
+  #   * Lazy connection + channel open (ensure_connection!).
+  #   * Connection recovery and channel rebuild on transient broker errors
+  #     (with_errors_handling retries on Bunny::ChannelAlreadyClosed,
+  #     Bunny::ConnectionClosedError, Bunny::NetworkFailure,
+  #     Bunny::ConnectionLevelException, Timeout::Error).
+  #   * Per-publish callbacks (run_callbacks(:publish)).
+  #
+  # The previous implementation overrode #publish and replicated mutex +
+  # ensure_connection! manually, leaving with_errors_handling and the
+  # callback wrap as gaps tracked in BEP-9829. This refactor closes those
+  # gaps by inheriting the contracts rather than re-implementing them.
   class LeveledDelayedPublisher < ::BunnyPublisher::Base
     # Level N has TTL 2^N seconds. 20 levels covers ~12.1 days.
     LEVELS = 20
@@ -21,7 +60,9 @@ module AdvancedSneakersActiveJob
     attr_reader :dlx_exchange_name
 
     def initialize(exchange:, **options)
-      # Base needs an exchange; we route per-publish so pin to DELIVERY_EXCHANGE.
+      # Base needs an exchange; we route per-publish so the parent's
+      # @exchange is effectively a placeholder. Our #exchange override
+      # picks the real per-message target.
       super(**options.merge(
         exchange: DELIVERY_EXCHANGE,
         exchange_options: { type: 'topic', durable: true }
@@ -70,27 +111,57 @@ module AdvancedSneakersActiveJob
     end
 
     # Adapter calls this with routing_key=<destination> and headers={'delay'=>N}.
+    # We only do pre-publish work here (validation + routing-key rewrite),
+    # then hand off to the parent's full publish lifecycle via super.
     def publish(message, options = {})
-      destination = options[:routing_key].to_s
-      delay       = options.dig(:headers, 'delay').to_i
+      delay = options.dig(:headers, 'delay').to_i
 
       if delay > MAX_DELAY
         raise DelayTooLargeError,
               "delay #{delay}s exceeds max #{MAX_DELAY}s (~#{MAX_DELAY / 86_400} days)"
       end
 
-      return publish_immediately(message, options) if delay <= 0
+      if delay > 0
+        destination = options[:routing_key].to_s
+        options = options.merge(routing_key: build_routing_key(delay, destination))
 
-      highest_bit    = highest_set_bit(delay)
-      target_name    = level_exchange_name(highest_bit)
-      routing_key    = build_routing_key(delay, destination)
-      level_exchange = level_exchange_for(highest_bit)
-
-      logger.debug do
-        "LeveledDelayedPublisher: publishing to [#{target_name}] with routing_key [#{routing_key}] and delay [#{delay}]"
+        logger.debug do
+          "LeveledDelayedPublisher: publishing to [#{level_exchange_name(highest_set_bit(delay))}] " \
+          "with routing_key [#{options[:routing_key]}] and delay [#{delay}]"
+        end
       end
 
-      level_exchange.publish(message, options.merge(routing_key: routing_key))
+      super(message, options)
+    end
+
+    # OVERRIDE: parent reads `exchange` once per publish to get the target.
+    # We pick the right one based on the current message's delay header.
+    #
+    # @message_options is set by the parent inside its own @mutex.synchronize
+    # block before this is called, so we can read it without additional
+    # synchronization. For delay > 0 we return the level topic exchange
+    # matching the highest set bit; for delay <= 0 we return a direct
+    # exchange to the configured dlx_exchange_name for immediate delivery.
+    def exchange
+      delay = @message_options&.dig(:headers, 'delay').to_i
+
+      if delay <= 0
+        @immediate_exchange ||= channel.direct(dlx_exchange_name, durable: true)
+      else
+        level = highest_set_bit(delay)
+        level_exchanges[level] ||= channel.topic(level_exchange_name(level), durable: true)
+      end
+    end
+
+    # OVERRIDE: parent calls this from with_errors_handling when a
+    # Bunny::ChannelAlreadyClosed forces a channel rebuild. The parent
+    # rebuilds @channel and its own @exchange; we invalidate our memoized
+    # per-level and immediate-direct handles so the retry hits the new
+    # channel rather than the dead one.
+    def reset_exchange!
+      super
+      @level_exchanges = nil
+      @immediate_exchange = nil
     end
 
     # 21-segment routing key: b{LEVELS-1}...b00.<destination>
@@ -108,10 +179,6 @@ module AdvancedSneakersActiveJob
     end
 
     private
-
-    def level_exchange_for(n)
-      level_exchanges[n] ||= channel.topic(level_exchange_name(n), durable: true)
-    end
 
     def level_exchanges
       @level_exchanges ||= Array.new(LEVELS)
@@ -134,11 +201,6 @@ module AdvancedSneakersActiveJob
         remaining >>= 1
       end
       bit
-    end
-
-    # Defensive: adapter normally short-circuits delay <= 0 via enqueue().
-    def publish_immediately(message, options)
-      channel.direct(dlx_exchange_name, durable: true).publish(message, options)
     end
   end
 end
