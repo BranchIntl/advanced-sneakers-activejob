@@ -3,9 +3,11 @@
 module AdvancedSneakersActiveJob
   # Bounded power-of-two TTL delayed publisher.
   #
-  # 20 quorum queues, one per power-of-2 second interval. A delay of D
-  # seconds routes through the levels matching its set bits, summing
-  # TTL to D exactly. Pattern follows NServiceBus / Celery.
+  # `levels` is configurable via `AdvancedSneakersActiveJob.config.delayed_delivery_levels`
+  # (default 20 -> max_delay ~12.1 days). Higher values cover larger delays at
+  # the cost of one additional quorum queue per level. INCREASING is additive
+  # and safe to roll out; DECREASING orphans messages in the now-removed level
+  # queues — treat as a one-way ramp in production.
   #
   # Implementation note: parent's publish lifecycle is inherited as-is.
   # We do NOT override BunnyPublisher::Base#publish. Instead we override
@@ -25,10 +27,10 @@ module AdvancedSneakersActiveJob
   #                       channel.
   #
   # The only thing we add at the top of #publish is a pre-step: validate
-  # the delay against MAX_DELAY (raises before mutex), and rewrite the
-  # caller's routing_key into the 21-segment binary-decomposed form the
-  # level topic exchanges expect. Then we hand off to super, which runs
-  # the parent's full publish flow (mutex, ensure_connection,
+  # the delay against max_delay (raises before mutex), and rewrite the
+  # caller's routing_key into the (levels + 1)-segment binary-decomposed
+  # form the level topic exchanges expect. Then we hand off to super,
+  # which runs the parent's full publish flow (mutex, ensure_connection,
   # with_errors_handling, callbacks, exchange.publish).
   #
   # This inherits, for free:
@@ -40,26 +42,27 @@ module AdvancedSneakersActiveJob
   #     Bunny::ConnectionClosedError, Bunny::NetworkFailure,
   #     Bunny::ConnectionLevelException, Timeout::Error).
   #   * Per-publish callbacks (run_callbacks(:publish)).
-  #
-  # The previous implementation overrode #publish and replicated mutex +
-  # ensure_connection! manually, leaving with_errors_handling and the
-  # callback wrap as gaps tracked in BEP-9829. This refactor closes those
-  # gaps by inheriting the contracts rather than re-implementing them.
   class LeveledDelayedPublisher < ::BunnyPublisher::Base
-    # Level N has TTL 2^N seconds. 20 levels covers ~12.1 days.
-    LEVELS = 20
+    DEFAULT_LEVELS = 20
 
-    # Delays above this raise DelayTooLargeError. No silent capping.
-    MAX_DELAY = (1 << LEVELS) - 1
+    # Maximum supported levels. AMQP topic exchange routing keys have a
+    # 255-byte limit. At ~2 bytes per segment plus the destination tail,
+    # this is well under that bound (60 segments + destination ~120 bytes).
+    MAX_LEVELS = 60
 
     # Every worker queue binds to this with pattern "#.<queue_name>".
     DELIVERY_EXCHANGE = 'delay.delivery.x'
 
     delegate :logger, to: :'::ActiveJob::Base'
 
-    attr_reader :dlx_exchange_name
+    attr_reader :dlx_exchange_name, :levels, :max_delay
 
-    def initialize(exchange:, **options)
+    def initialize(exchange:, levels: AdvancedSneakersActiveJob.config.delayed_delivery_levels, **options)
+      validate_levels!(levels)
+
+      @levels = levels
+      @max_delay = (1 << levels) - 1
+
       # Base needs an exchange; we route per-publish so the parent's
       # @exchange is effectively a placeholder. Our #exchange override
       # picks the real per-message target.
@@ -70,8 +73,8 @@ module AdvancedSneakersActiveJob
       @dlx_exchange_name = exchange
     end
 
-    # Declare the 20-level topology. Idempotent. Call at boot before
-    # any worker queue binds to DELIVERY_EXCHANGE.
+    # Declare the level topology. Idempotent. Call at boot before any worker
+    # queue binds to DELIVERY_EXCHANGE.
     #
     # Accepts an optional channel override. At boot time the publisher's own
     # channel may not be open yet (BunnyPublisher::Base opens lazily on first
@@ -83,7 +86,7 @@ module AdvancedSneakersActiveJob
 
       ch.topic(DELIVERY_EXCHANGE, durable: true)
 
-      (0...LEVELS).each do |n|
+      (0...@levels).each do |n|
         level_exchange = ch.topic(level_exchange_name(n), durable: true)
         next_dlx_name  = n.zero? ? DELIVERY_EXCHANGE : level_exchange_name(n - 1)
 
@@ -105,7 +108,7 @@ module AdvancedSneakersActiveJob
         next_exchange.bind(level_exchange, routing_key: bit_pattern(n, '0'))
       end
 
-      logger.info { "LeveledDelayedPublisher: topology declared (#{LEVELS} levels, max #{MAX_DELAY}s)" } if defined?(::Rails)
+      logger.info { "LeveledDelayedPublisher: topology declared (#{@levels} levels, max #{@max_delay}s)" } if defined?(::Rails)
 
       nil
     end
@@ -116,9 +119,9 @@ module AdvancedSneakersActiveJob
     def publish(message, options = {})
       delay = options.dig(:headers, 'delay').to_i
 
-      if delay > MAX_DELAY
+      if delay > @max_delay
         raise DelayTooLargeError,
-              "delay #{delay}s exceeds max #{MAX_DELAY}s (~#{MAX_DELAY / 86_400} days)"
+              "delay #{delay}s exceeds max #{@max_delay}s (~#{@max_delay / 86_400} days)"
       end
 
       if delay > 0
@@ -164,9 +167,9 @@ module AdvancedSneakersActiveJob
       @immediate_exchange = nil
     end
 
-    # 21-segment routing key: b{LEVELS-1}...b00.<destination>
+    # (levels + 1)-segment routing key: b{levels-1}...b00.<destination>
     def build_routing_key(delay, destination)
-      bits = (LEVELS - 1).downto(0).map { |bit| (delay >> bit) & 1 }
+      bits = (@levels - 1).downto(0).map { |bit| (delay >> bit) & 1 }
       (bits + [destination]).join('.')
     end
 
@@ -180,15 +183,27 @@ module AdvancedSneakersActiveJob
 
     private
 
+    def validate_levels!(value)
+      unless value.is_a?(Integer) && value >= 1
+        raise ArgumentError, "LeveledDelayedPublisher levels must be a positive Integer (got #{value.inspect})"
+      end
+
+      if value > MAX_LEVELS
+        raise ArgumentError,
+              "LeveledDelayedPublisher levels=#{value} exceeds MAX_LEVELS=#{MAX_LEVELS} " \
+              '(AMQP routing key segment budget would be at risk)'
+      end
+    end
+
     def level_exchanges
-      @level_exchanges ||= Array.new(LEVELS)
+      @level_exchanges ||= Array.new(@levels)
     end
 
     # Topic pattern with slot N pinned, other bit slots wild, '#' for destination.
-    # Slot for bit N is at position LEVELS-1-N (routing key is MSB-first).
+    # Slot for bit N is at position levels-1-N (routing key is MSB-first).
     def bit_pattern(n, value)
-      segments = Array.new(LEVELS, '*')
-      segments[LEVELS - 1 - n] = value
+      segments = Array.new(@levels, '*')
+      segments[@levels - 1 - n] = value
       "#{segments.join('.')}.#"
     end
 

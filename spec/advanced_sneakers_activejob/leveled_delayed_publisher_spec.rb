@@ -3,25 +3,35 @@
 require 'logger'
 
 describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
+  let(:levels) { described_class::DEFAULT_LEVELS }
+  let(:max_delay) { (1 << levels) - 1 }
+
   let(:publisher) do
     # Skip BunnyPublisher::Base#initialize so unit tests don't need a live broker.
     # We still need @mutex because the parent's #publish (which our override
     # delegates to via super) wraps the publish flow in @mutex.synchronize.
+    # @levels / @max_delay are normally set by our initialize from the gem
+    # config; we set them directly here since we're bypassing initialize.
     publisher = described_class.allocate
     publisher.instance_variable_set(:@dlx_exchange_name, 'activejob')
     publisher.instance_variable_set(:@mutex, Mutex.new)
+    publisher.instance_variable_set(:@levels, levels)
+    publisher.instance_variable_set(:@max_delay, max_delay)
     allow(publisher).to receive(:logger).and_return(Logger.new(IO::NULL))
     publisher
   end
 
   describe 'constants' do
-    it 'declares 20 levels' do
-      expect(described_class::LEVELS).to eq(20)
+    it 'declares a sane default level count' do
+      expect(described_class::DEFAULT_LEVELS).to eq(20)
     end
 
-    it 'caps max delay at 2^LEVELS - 1 seconds (~12.1 days)' do
-      expect(described_class::MAX_DELAY).to eq((1 << 20) - 1)
-      expect(described_class::MAX_DELAY).to eq(1_048_575)
+    it 'derives max_delay = 2^DEFAULT_LEVELS - 1 (~12.1 days at the default)' do
+      expect((1 << described_class::DEFAULT_LEVELS) - 1).to eq(1_048_575)
+    end
+
+    it 'caps the configurable upper bound to fit AMQP routing-key budget' do
+      expect(described_class::MAX_LEVELS).to eq(60)
     end
 
     it 'names the delivery exchange explicitly' do
@@ -66,16 +76,16 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
     end
 
     it 'encodes the maximum representable delay as all bits set' do
-      key = publisher.build_routing_key(described_class::MAX_DELAY, 'q')
+      key = publisher.build_routing_key(max_delay, 'q')
 
-      bits = key.split('.').first(20).join
-      expect(bits).to eq('1' * 20)
+      bits = key.split('.').first(levels).join
+      expect(bits).to eq('1' * levels)
     end
 
-    it 'always emits exactly LEVELS + 1 segments' do
+    it 'always emits exactly levels + 1 segments' do
       key = publisher.build_routing_key(47, 'sla_ten_second')
 
-      expect(key.split('.').length).to eq(described_class::LEVELS + 1)
+      expect(key.split('.').length).to eq(levels + 1)
     end
   end
 
@@ -109,10 +119,10 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
       end
     end
 
-    context 'when delay exceeds MAX_DELAY' do
+    context 'when delay exceeds max_delay' do
       it 'raises DelayTooLargeError without publishing' do
         expect do
-          publisher.publish('payload', routing_key: 'q', headers: { 'delay' => described_class::MAX_DELAY + 1 })
+          publisher.publish('payload', routing_key: 'q', headers: { 'delay' => max_delay + 1 })
         end.to raise_error(AdvancedSneakersActiveJob::DelayTooLargeError, /exceeds.*max/)
 
         expect(exchange).not_to have_received(:publish)
@@ -137,10 +147,10 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
         expect(channel).to have_received(:topic).with('delay.level.00.x', durable: true)
       end
 
-      it 'targets level.19 for delays at the upper bound' do
-        publisher.publish('payload', routing_key: 'q', headers: { 'delay' => described_class::MAX_DELAY })
+      it 'targets the highest level for delays at the upper bound' do
+        publisher.publish('payload', routing_key: 'q', headers: { 'delay' => max_delay })
 
-        expect(channel).to have_received(:topic).with('delay.level.19.x', durable: true)
+        expect(channel).to have_received(:topic).with(format('delay.level.%02d.x', levels - 1), durable: true)
       end
 
       it 'preserves caller-supplied options other than routing_key' do

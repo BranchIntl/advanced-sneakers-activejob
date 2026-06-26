@@ -23,6 +23,8 @@ module AdvancedSneakersActiveJob
     # Adapter dispatches per-publish via this value.
     config_accessor(:delayed_delivery) { :legacy }
 
+    config_accessor(:delayed_delivery_levels) { LeveledDelayedPublisher::DEFAULT_LEVELS }
+
     config_accessor(:publish_connection)
 
     def republish_connection=(_)
