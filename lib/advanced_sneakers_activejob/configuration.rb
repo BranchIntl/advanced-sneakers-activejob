@@ -23,7 +23,8 @@ module AdvancedSneakersActiveJob
     # Adapter dispatches per-publish via this value.
     config_accessor(:delayed_delivery) { :legacy }
 
-    config_accessor(:delayed_delivery_levels) { LeveledDelayedPublisher::DEFAULT_LEVELS }
+    # Number of TTL levels in the leveled delayed delivery topology.
+    config_accessor(:delayed_delivery_levels) { 20 }
 
     config_accessor(:publish_connection)
 
