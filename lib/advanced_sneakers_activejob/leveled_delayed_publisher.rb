@@ -53,6 +53,15 @@ module AdvancedSneakersActiveJob
     # Every worker queue binds to this with pattern "#.<queue_name>".
     DELIVERY_EXCHANGE = 'delay.delivery.x'
 
+    # Safety net for messages reaching DELIVERY_EXCHANGE with no matching
+    # binding (the final hop is a broker-internal dead-letter republish, so
+    # `mandatory` cannot catch them). Attached to DELIVERY_EXCHANGE as its
+    # alternate-exchange via POLICY, never via a declare-time argument:
+    # the exchange already exists in production without that argument, and
+    # redeclaring with new args raises 406 PRECONDITION_FAILED on every boot.
+    UNROUTED_EXCHANGE = 'delay.delivery.unrouted.x'
+    PARKING_QUEUE = 'delay.delivery.parking'
+
     delegate :logger, to: :'::ActiveJob::Base'
 
     attr_reader :dlx_exchange_name, :levels, :max_delay
@@ -85,6 +94,9 @@ module AdvancedSneakersActiveJob
       raise 'LeveledDelayedPublisher#declare_topology! requires an open channel' if ch.nil?
 
       ch.topic(DELIVERY_EXCHANGE, durable: true)
+
+      unrouted_exchange = ch.fanout(UNROUTED_EXCHANGE, durable: true)
+      ch.queue(PARKING_QUEUE, durable: true, arguments: { 'x-queue-type' => 'quorum' }).bind(unrouted_exchange)
 
       (0...@levels).each do |n|
         level_exchange = ch.topic(level_exchange_name(n), durable: true)
