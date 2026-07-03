@@ -198,8 +198,11 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
     let(:exchanges) { Hash.new { |h, k| h[k] = instance_double('Bunny::Exchange', bind: nil) } }
     let(:queues) { Hash.new { |h, k| h[k] = instance_double('Bunny::Queue', bind: nil) } }
 
+    let(:connection) { instance_double('Bunny::Session', server_properties: { 'version' => '3.13.7' }) }
+
     before do
       allow(publisher).to receive(:channel).and_return(channel)
+      allow(channel).to receive(:connection).and_return(connection)
       allow(channel).to receive(:topic) { |name, **| exchanges[name] }
       allow(channel).to receive(:fanout) { |name, **| exchanges[name] }
       allow(channel).to receive(:queue) { |name, **| queues[name] }
@@ -333,6 +336,35 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
     it 'is idempotent (safe to call twice)' do
       publisher.declare_topology!
       expect { publisher.declare_topology! }.not_to raise_error
+    end
+
+    context 'when the broker predates quorum-queue TTL support (< 3.10)' do
+      let(:connection) { instance_double('Bunny::Session', server_properties: { 'version' => '3.8.35' }) }
+
+      it 'fails fast with a clear BrokerVersionError before declaring anything' do
+        expect { publisher.declare_topology! }
+          .to raise_error(AdvancedSneakersActiveJob::BrokerVersionError, /requires RabbitMQ >= 3\.10.*3\.8\.35/)
+
+        expect(channel).not_to have_received(:topic)
+        expect(channel).not_to have_received(:queue)
+      end
+    end
+
+    context 'when the broker is 4.x' do
+      let(:connection) { instance_double('Bunny::Session', server_properties: { 'version' => '4.0.1' }) }
+
+      it 'declares the topology' do
+        expect { publisher.declare_topology! }.not_to raise_error
+        expect(channel).to have_received(:topic).with('delay.delivery.x', durable: true).at_least(:once)
+      end
+    end
+
+    context 'when the broker version cannot be determined' do
+      let(:connection) { instance_double('Bunny::Session', server_properties: {}) }
+
+      it 'proceeds rather than blocking a possibly-valid broker' do
+        expect { publisher.declare_topology! }.not_to raise_error
+      end
     end
 
     context 'against a real broker', :rabbitmq do

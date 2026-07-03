@@ -72,6 +72,8 @@ Take into accout that **this process is asynchronous**. It means that in case of
 
 ## Leveled delayed delivery: parking unroutable messages
 
+**Requirements:** the leveled path declares the `delay.level.*` queues as quorum queues with per-level message TTL (`x-message-ttl`), which RabbitMQ supports on quorum queues only from **3.10** onwards. On older brokers `LeveledDelayedPublisher#declare_topology!` fails fast with `AdvancedSneakersActiveJob::BrokerVersionError` rather than a cryptic `PRECONDITION_FAILED`; run `config.delayed_delivery = :legacy` on brokers below 3.10.
+
 The leveled delayed topology terminates on the `delay.delivery.x` topic exchange. A message reaching it with no matching binding would be silently dropped — the final hop is a broker-internal dead-letter republish, so the `mandatory` flag cannot catch it. As a safety net, `LeveledDelayedPublisher#declare_topology!` also declares:
 
 - durable fanout exchange `delay.delivery.unrouted.x`

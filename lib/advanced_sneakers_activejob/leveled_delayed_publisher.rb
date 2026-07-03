@@ -62,6 +62,12 @@ module AdvancedSneakersActiveJob
     UNROUTED_EXCHANGE = 'delay.delivery.unrouted.x'
     PARKING_QUEUE = 'delay.delivery.parking'
 
+    # The level queues are quorum queues declared with x-message-ttl, which
+    # RabbitMQ supports on quorum queues only from 3.10 onwards. On older
+    # brokers the declare fails with a cryptic "PRECONDITION_FAILED - invalid
+    # arg 'x-message-ttl'"; we fail fast with a clear message instead.
+    MIN_RABBITMQ_VERSION = '3.10'
+
     delegate :logger, to: :'::ActiveJob::Base'
 
     attr_reader :dlx_exchange_name, :levels, :max_delay
@@ -92,6 +98,8 @@ module AdvancedSneakersActiveJob
     def declare_topology!(channel_override = nil)
       ch = channel_override || channel
       raise 'LeveledDelayedPublisher#declare_topology! requires an open channel' if ch.nil?
+
+      ensure_broker_supports_quorum_ttl!(ch)
 
       ch.topic(DELIVERY_EXCHANGE, durable: true)
 
@@ -194,6 +202,29 @@ module AdvancedSneakersActiveJob
     end
 
     private
+
+    # Fail fast (before declaring anything) when the broker predates quorum-queue
+    # message TTL support. Best-effort: if the version can't be read, proceed and
+    # let the declare surface any real error rather than block a valid broker.
+    def ensure_broker_supports_quorum_ttl!(ch)
+      version = broker_version(ch)
+      return if version.nil?
+
+      major, minor = version.split('.', 3).first(2).map(&:to_i)
+      return if major > 3 || (major == 3 && minor >= 10)
+
+      raise BrokerVersionError,
+            "LeveledDelayedPublisher requires RabbitMQ >= #{MIN_RABBITMQ_VERSION} for quorum-queue " \
+            "message TTL (x-message-ttl on delay.level.* queues); broker reports version #{version.inspect}. " \
+            'Upgrade the broker, or use legacy delayed delivery (config.delayed_delivery = :legacy).'
+    end
+
+    def broker_version(ch)
+      version = ch.connection.server_properties['version'].to_s
+      version.empty? ? nil : version
+    rescue StandardError
+      nil
+    end
 
     def validate_levels!(value)
       unless value.is_a?(Integer) && value >= 1
