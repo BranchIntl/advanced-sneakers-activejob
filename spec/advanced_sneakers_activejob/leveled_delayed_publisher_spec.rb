@@ -298,6 +298,30 @@ describe AdvancedSneakersActiveJob::LeveledDelayedPublisher do
       end
     end
 
+    context 'when the broker connection blips during the bind (non-404 error)' do
+      before do
+        allow(connection).to receive(:create_channel).and_raise(Bunny::NetworkFailure.new('connection down', nil))
+      end
+
+      it 'logs a warning and still publishes the message (enqueue must never fail on a bind)' do
+        expect(publisher.logger).to receive(:warn)
+
+        publisher.publish('payload', routing_key: 'orders', headers: { 'delay' => 47 })
+
+        expect(publish_exchange).to have_received(:publish)
+      end
+
+      it 'does not memoize, so the bind retries once the connection recovers' do
+        publisher.publish('payload', routing_key: 'orders', headers: { 'delay' => 47 })
+
+        allow(connection).to receive(:create_channel).and_return(bind_channel)
+
+        publisher.publish('payload', routing_key: 'orders', headers: { 'delay' => 47 })
+
+        expect(bind_channel).to have_received(:queue_bind).with('orders', 'delay.delivery.x', routing_key: '#.orders')
+      end
+    end
+
     describe 'memo invalidation on #reset_exchange!' do
       before { allow(publisher).to receive(:build_exchange).and_return(publish_exchange) }
 
