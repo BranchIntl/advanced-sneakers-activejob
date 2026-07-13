@@ -328,6 +328,17 @@ module AdvancedSneakersActiveJob
       ensure
         bind_channel.close if bind_channel.open?
       end
+    # A broker/network error here (connection blip, closed channel, timeout)
+    # must not fail the enqueue: the parent publisher's retry machinery only
+    # engages inside super, and legacy behavior never raised for binding
+    # problems. Publish anyway; the failed bind is not memoized, so the next
+    # publish retries it, and the parking/retention nets cover the gap.
+    rescue StandardError => error
+      logger.warn do
+        "LeveledDelayedPublisher: could not ensure destination binding for [#{destination}] " \
+        "(#{error.class}: #{error.message}); publishing anyway (parking/retention net will " \
+        'recover the message once the binding appears)'
+      end
     end
 
     def destination_bound?(destination)
