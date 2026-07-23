@@ -98,8 +98,22 @@ describe 'Handler', :rabbitmq do
       describe 'retried job headers' do
         subject do
           super()
-          sleep 0.1
-          rabbitmq_messages('delayed:3').first.properties.headers
+          # The retry republish to delayed:3 is asynchronous (consume -> fail ->
+          # re-publish). Poll for the message rather than a fixed sleep so a slow
+          # CI broker does not race us to a nil read. The queue may not exist for
+          # the first few polls (404); default ackmode requeues, so repeated gets
+          # leave the message in place once it lands.
+          message = nil
+          Timeout.timeout(5) do
+            until message
+              begin
+                message = rabbitmq_messages('delayed:3').first
+              rescue Faraday::ResourceNotFound
+                nil # delayed:3 not declared yet; keep polling
+              end
+            end
+          end
+          message.properties.headers
         end
 
         it 'have error details', :aggregate_failures do
