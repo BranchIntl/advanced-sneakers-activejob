@@ -24,8 +24,11 @@ module RabbitmqHelpers
       create_vhost
     end
 
+    # RabbitMQ 4.x reports its default `x-queue-type: classic` as a queue argument; 3.x does not.
     def queues(columns: %w[name passive durable exclusive auto_delete arguments])
-      client.list_queues(vhost, columns: columns.join(','))
+      client.list_queues(vhost, columns: columns.join(',')).each do |queue|
+        queue['arguments']&.delete('x-queue-type') if queue.dig('arguments', 'x-queue-type') == 'classic'
+      end
     end
 
     def messages(queue, ackmode: 'ack_requeue_true', count: 1, encoding: 'auto')

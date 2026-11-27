@@ -14,7 +14,7 @@ jobs:
         # Quorum queues gained x-message-ttl support in RabbitMQ 3.10; the
         # leveled delayed topology (delay.level.* quorum queues with TTL)
         # cannot be declared on older brokers. Match production (>= 3.10).
-        image: rabbitmq:3.13-management-alpine
+        image: rabbitmq:${{ matrix.rabbitmq || '3.13' }}-management-alpine
         options: >-
           --health-cmd "rabbitmq-diagnostics -q listeners"
           --health-interval 10s
@@ -47,6 +47,14 @@ jobs:
             gemfile: gemfiles/activejob_6.0.x.gemfile
           - ruby: '3.2'
             gemfile: gemfiles/activejob_6.1.x.gemfile
+        # Each include entry is its own job: Ruby 3.4 and Rails 8.1 on both RabbitMQ 3.13 and 4.2.
+        include:
+          - ruby: '3.4'
+            gemfile: gemfiles/activejob_8.1.x.gemfile
+            rabbitmq: '3.13'
+          - ruby: '3.4'
+            gemfile: gemfiles/activejob_8.1.x.gemfile
+            rabbitmq: '4.2'
     steps:
     - name: Checkout code
       uses: actions/checkout@v2

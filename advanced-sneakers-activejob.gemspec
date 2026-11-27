@@ -33,6 +33,8 @@ Gem::Specification.new do |spec|
 
   spec.add_development_dependency 'appraisal', '~> 2.5.0'
   spec.add_development_dependency 'bundler'
+  # rabbitmq_http_api_client 1.x pulls faraday 1.x, which passes JSON.parse options positionally; json 3 rejects that.
+  spec.add_development_dependency 'json', '< 3'
   spec.add_development_dependency 'pry-byebug'
   spec.add_development_dependency 'rabbitmq_http_api_client', '~> 1.13'
   spec.add_development_dependency 'rspec', '~> 3.0'
