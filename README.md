@@ -163,6 +163,8 @@ Error name is tracked in `x-last-error-name`, error full message is tracked in `
 ActiveSupport::Gzip.decompress(Base64.decode64(data_from_header))
 ```
 
+The retry count is tracked in `x-death-count` and passed to `retry_delay_proc`. RabbitMQ 4.x drops `x-death` rows that a client publishes, so the handler cannot rely on `x-death` alone. The handler still updates its `x-death` row and uses the larger of the two counts, so messages published before `x-death-count` keep their count.
+
 \* For RabbitMQ queues amount optimization exponential backoff is not calculated by formula, but predifined. You can customize `retry_delay_proc` in [configuration](#configuration)
 
 ## AMQP metadata
