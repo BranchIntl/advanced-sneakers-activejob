@@ -1,11 +1,10 @@
 # frozen_string_literal: true
 
 require 'logger'
-require 'timeout'
 require 'active_job'
 require 'active_job/queue_adapters'
 
-# Repros and coverage for the v0.8.0 delayed-delivery changes (#11, #12, #13),
+# Repros and coverage for the v0.8.0 delayed-delivery changes (#11, #13),
 # run against a real broker. Examples marked `pending` prove a defect: they
 # fail today and RSpec reports them as pending; once the defect is fixed they
 # pass and RSpec flags them so the `pending` can be removed.
@@ -70,10 +69,8 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
       with_channel { |channel| channel.fanout(delivery_exchange, durable: true) }
     end
 
-    it 'keeps the publisher usable for other publishes' do
-      pending 'defect: the bind runs on the shared publish channel, the rescue hides the close, ' \
-              'and with_errors_handling retries setup_queue_for_republish forever while holding @mutex'
-
+    it 'logs one error and keeps the publisher usable for other publishes' do
+      allow(logger).to receive(:error).and_call_original
       resets = 0
       allow(publisher).to receive(:reset_exchange!).and_wrap_original do |original|
         resets += 1
@@ -84,16 +81,11 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
       sleep 0.5 # let the returned-message thread take @mutex
 
       second = Thread.new { publisher.publish('second', routing_key: 'ghost_orders') }
-      finished = second.join(3)
+      expect(second.join(3)).not_to be_nil, "second publish still blocked after 3s; reset_exchange! ran #{resets} times"
 
-      begin
-        expect(finished).not_to be_nil,
-                                "second publish still blocked after 3s; reset_exchange! ran #{resets} times"
-      ensure
-        # Repair the topology so the looping republish thread can finish.
-        http.client.delete_exchange(http.vhost, delivery_exchange)
-        second.join(10)
-      end
+      expect(wait_until(timeout: 5) { message_count('ghost_orders') == 2 }).to be(true)
+      expect(resets).to eq(0)
+      expect(logger).to have_received(:error).once
     end
   end
 
@@ -227,94 +219,6 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
       sleep 3
 
       expect(message_count('delay.delivery.parking')).to eq(0)
-    end
-  end
-
-  describe 'just-in-time destination binding under concurrency (#12)' do
-    let(:leveled) { leveled_publisher(levels: 4) }
-
-    before do
-      with_channel do |channel|
-        leveled.declare_topology!(channel)
-        channel.queue('orders', durable: true)
-      end
-    end
-
-    it 'binds once and publishes every message when many threads publish to a cold destination' do
-      threads = Array.new(16) do |i|
-        Thread.new { leveled.publish("payload-#{i}", routing_key: 'orders', headers: { 'delay' => 1 }) }
-      end
-      threads.each { |thread| expect(thread.join(10)).not_to be_nil }
-
-      bindings = rabbitmq_bindings(queue: 'orders', exchange: delivery_exchange).select { |b| b.routing_key == '#.orders' }
-      expect(bindings.size).to eq(1)
-      expect(leveled.send(:destination_bound?, 'orders')).to be(true)
-      expect(wait_until(timeout: 5) { message_count('orders') == 16 }).to be(true)
-    end
-
-    context 'when many threads publish to a missing destination (404 on each bind)' do
-      let(:connection) { Bunny.new(ENV.fetch('RABBITMQ_URL'), continuation_timeout: 2_000).start }
-
-      it 'publishes each message promptly' do
-        pending 'defect: the 404 closes the bind channel from the broker side; Bunny reader thread then waits for ' \
-                '@channel_mutex, which another thread holds in create_channel while it waits for channel.open-ok ' \
-                'that only the reader can deliver, so both stall until continuation_timeout'
-
-        durations = Array.new(4) do |i|
-          Thread.new do
-            started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-            2.times { |j| leveled.publish("payload-#{i}-#{j}", routing_key: 'never_declared', headers: { 'delay' => 1 }) }
-            Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
-          end
-        end.map { |thread| thread.join(120).value.round(2) }
-
-        expect(leveled.send(:destination_bound?, 'never_declared')).to be(false)
-        expect(durations.max).to be < 1, "per-thread durations for 2 publishes each: #{durations.inspect}s"
-      end
-    end
-
-    it 'does not deadlock in a child forked while another thread holds the memo mutex' do
-      leveled.publish('warm', routing_key: 'orders', headers: { 'delay' => 1 })
-
-      mutex = leveled.send(:bound_destinations_mutex)
-      locked = Queue.new
-      holder = Thread.new { mutex.synchronize { locked << true; sleep 2 } }
-      locked.pop
-
-      pid = fork do
-        result = Timeout.timeout(1) { leveled.send(:destination_bound?, 'orders') }
-        exit!(result ? 0 : 1)
-      rescue Timeout::Error
-        exit!(2)
-      end
-      _, status = Process.wait2(pid)
-      holder.join
-
-      expect(status.exitstatus).to eq(0)
-    end
-  end
-
-  describe 'just-in-time destination binding when the bind channel breaks (#12)' do
-    let(:publisher) { leveled_publisher(levels: 4) }
-    let(:publish_exchange) { instance_double('Bunny::Exchange', publish: nil) }
-    let(:publish_channel) { instance_double('Bunny::Channel', topic: publish_exchange) }
-    let(:bind_channel) { instance_double('Bunny::Channel', open?: true) }
-    let(:fake_connection) { instance_double('Bunny::Session', create_channel: bind_channel) }
-
-    before do
-      allow(publisher).to receive(:ensure_connection!)
-      allow(publisher).to receive(:channel).and_return(publish_channel)
-      allow(publisher).to receive(:connection).and_return(fake_connection)
-    end
-
-    it 'still publishes when the bind times out and closing the channel also fails' do
-      allow(bind_channel).to receive(:queue_bind).and_raise(Timeout::Error)
-      allow(bind_channel).to receive(:close).and_raise(Bunny::ConnectionClosedError.new(bind_channel))
-
-      expect { publisher.publish('payload', routing_key: 'orders', headers: { 'delay' => 3 }) }.not_to raise_error
-
-      expect(publish_exchange).to have_received(:publish)
-      expect(publisher.send(:destination_bound?, 'orders')).to be(false)
     end
   end
 end

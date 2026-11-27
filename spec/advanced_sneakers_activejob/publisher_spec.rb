@@ -13,14 +13,9 @@ describe AdvancedSneakersActiveJob::Publisher do
       p
     end
 
-    # The Mandatory#setup_queue_for_republish declares the republish queue on the
-    # publish channel, then calls declare_republish_queue_binding(queue). The
-    # queue exposes its #channel and #name, and #bind to bind to an exchange.
-    let(:queue_channel) { instance_double('Bunny::Channel', topic: delivery_exchange) }
-    let(:delivery_exchange) { instance_double('Bunny::Exchange') }
-    let(:queue) do
-      instance_double('Bunny::Queue', name: 'orders', channel: queue_channel, bind: nil)
-    end
+    let(:queue) { instance_double('Bunny::Queue', name: 'orders') }
+    let(:bind_channel) { instance_double('Bunny::Channel', topic: nil, queue_bind: nil, open?: true, close: nil) }
+    let(:connection) { instance_double('Bunny::Session', create_channel: bind_channel) }
 
     before do
       # super() chains into Mandatory#declare_republish_queue_binding, which binds
@@ -28,6 +23,7 @@ describe AdvancedSneakersActiveJob::Publisher do
       # unit test isolates OUR added delivery-exchange bind; the activejob bind is
       # exercised by the real-broker test below.
       allow_any_instance_of(BunnyPublisher::Mandatory).to receive(:declare_republish_queue_binding)
+      allow(publisher).to receive(:connection).and_return(connection)
     end
 
     it 'chains super (preserving the activejob bind) before adding the delivery bind' do
@@ -36,16 +32,22 @@ describe AdvancedSneakersActiveJob::Publisher do
       publisher.declare_republish_queue_binding(queue)
     end
 
-    it 'idempotently declares delay.delivery.x as a durable topic exchange' do
+    it 'idempotently declares delay.delivery.x as a durable topic exchange on its own channel' do
       publisher.declare_republish_queue_binding(queue)
 
-      expect(queue_channel).to have_received(:topic).with(delivery_exchange_name, durable: true)
+      expect(bind_channel).to have_received(:topic).with(delivery_exchange_name, durable: true)
     end
 
     it 'binds the queue to delay.delivery.x with a "#.<queue_name>" routing key' do
       publisher.declare_republish_queue_binding(queue)
 
-      expect(queue).to have_received(:bind).with(delivery_exchange, routing_key: '#.orders')
+      expect(bind_channel).to have_received(:queue_bind).with('orders', delivery_exchange_name, routing_key: '#.orders')
+    end
+
+    it 'closes its own channel afterwards' do
+      publisher.declare_republish_queue_binding(queue)
+
+      expect(bind_channel).to have_received(:close)
     end
 
     context 'when the delivery-exchange bind fails' do
@@ -54,10 +56,10 @@ describe AdvancedSneakersActiveJob::Publisher do
       before do
         allow(publisher).to receive(:logger).and_return(real_logger)
         allow(real_logger).to receive(:error)
-        # Model a real-ish broker refusal (e.g. 406 PRECONDITION_FAILED closing
-        # the channel) surfacing from the bind.
-        allow(queue).to receive(:bind).and_raise(
-          Bunny::PreconditionFailed.new('PRECONDITION_FAILED - inequivalent arg', queue_channel, false)
+        # The broker closed the channel that issued the refused declare.
+        allow(bind_channel).to receive(:open?).and_return(false)
+        allow(bind_channel).to receive(:topic).and_raise(
+          Bunny::PreconditionFailed.new('PRECONDITION_FAILED - inequivalent arg', bind_channel, false)
         )
       end
 
@@ -80,6 +82,15 @@ describe AdvancedSneakersActiveJob::Publisher do
 
         publisher.declare_republish_queue_binding(queue)
       end
+    end
+
+    it 'swallows and logs a failure to close its channel' do
+      real_logger = instance_double(Logger, error: nil)
+      allow(publisher).to receive(:logger).and_return(real_logger)
+      allow(bind_channel).to receive(:close).and_raise(Bunny::ConnectionClosedError.new(bind_channel))
+
+      expect { publisher.declare_republish_queue_binding(queue) }.not_to raise_error
+      expect(real_logger).to have_received(:error)
     end
   end
 
@@ -141,6 +152,69 @@ describe AdvancedSneakersActiveJob::Publisher do
 
       sleep 0.05
       retry
+    end
+  end
+
+  describe 'unrouted immediate publish when the user may not configure delay.delivery.x', :rabbitmq do
+    let(:http) { RabbitmqHelpers.http_api }
+    let(:limited_user) { 'asaj_limited' }
+    let(:admin) { Bunny.new(ENV.fetch('RABBITMQ_URL')).start }
+    let(:limited) do
+      uri = URI(ENV.fetch('RABBITMQ_URL'))
+      uri.user = limited_user
+      uri.password = limited_user
+      Bunny.new(uri.to_s).start
+    end
+    let(:logger) { Logger.new(IO::NULL) }
+
+    let(:publisher) do
+      described_class.new(exchange: 'activejob', exchange_options: { type: 'direct', durable: true }, connection: limited)
+    end
+
+    before do
+      http.client.update_user(limited_user, password: limited_user, tags: '')
+      http.client.update_permissions_of(http.vhost, limited_user,
+                                        configure: '^(?!delay\\.delivery\\.x$).*', write: '.*', read: '.*')
+      allow(publisher).to receive(:logger).and_return(logger)
+      allow(logger).to receive(:error).and_call_original
+      allow(AdvancedSneakersActiveJob.config).to receive(:handle_unrouted_messages).and_return(true)
+    end
+
+    after do
+      limited.close if limited.open?
+      admin.close if admin.open?
+      http.client.delete_user(limited_user)
+    end
+
+    def ghost_orders_count
+      channel = admin.create_channel
+      channel.queue_declare('ghost_orders', passive: true).message_count
+    rescue Bunny::NotFound
+      0
+    ensure
+      channel.close if channel&.open?
+    end
+
+    it 'republishes once, logs one error and keeps publishing (403 on the delay.delivery.x declare)' do
+      resets = 0
+      allow(publisher).to receive(:reset_exchange!).and_wrap_original do |original|
+        resets += 1
+        original.call
+      end
+
+      publisher.publish('unrouted', routing_key: 'ghost_orders')
+      sleep 0.5 # let the returned-message thread take @mutex
+
+      second = Thread.new { publisher.publish('second', routing_key: 'ghost_orders') }
+      expect(second.join(3)).not_to be_nil, "second publish still blocked after 3s; reset_exchange! ran #{resets} times"
+
+      deadline = Time.now + 5
+      sleep 0.05 until ghost_orders_count == 2 || Time.now > deadline
+
+      expect(ghost_orders_count).to eq(2)
+      expect(resets).to eq(0)
+      expect(logger).to have_received(:error).once
+      expect(rabbitmq_bindings(queue: 'ghost_orders', exchange: delivery_exchange_name)).to be_empty
     end
   end
 end
