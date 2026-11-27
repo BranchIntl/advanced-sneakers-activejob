@@ -12,7 +12,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - [#10](https://github.com/BranchIntl/advanced-sneakers-activejob/pull/10) Auto-bind every ActiveJob worker queue to `delay.delivery.x` (routing key `#.<queue>`) at subscribe time. Unconditional and idempotent.
 - [#11](https://github.com/BranchIntl/advanced-sneakers-activejob/pull/11) `declare_topology!` additionally declares the `delay.delivery.unrouted.x` fanout and the `delay.delivery.parking` quorum queue as a safety net for unroutable matured messages. README documents the alternate-exchange policy and the redrive runbook.
-- [#12](https://github.com/BranchIntl/advanced-sneakers-activejob/pull/12) `LeveledDelayedPublisher#publish` creates the destination binding just in time before a delayed publish when it is missing, memoized per destination per process. New config switch `leveled_ensure_binding_on_publish` (default `true`).
 
 ### Fixed
 - [#11](https://github.com/BranchIntl/advanced-sneakers-activejob/pull/11) `declare_topology!` raises `AdvancedSneakersActiveJob::BrokerVersionError` on brokers older than RabbitMQ 3.10 instead of a cryptic `PRECONDITION_FAILED`.

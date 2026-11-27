@@ -26,11 +26,13 @@ module AdvancedSneakersActiveJob
     # destination binding contract, so an auto-created queue is immediately
     # reachable for leveled delayed delivery too.
     #
-    # The queue's channel is the same publish channel the parent uses
-    # (declare_republish_queue calls `channel.queue(...)`), so we declare and
-    # bind the delivery exchange on `queue.channel`.
+    # Dedicated short-lived channel, never the publish channel: a broker refusal
+    # (403 access_refused, 406 precondition_failed) closes the channel that
+    # issued it. On the publish channel that close would make the republish
+    # raise ChannelAlreadyClosed, and with_errors_handling would rerun the whole
+    # setup forever while holding @mutex.
     #
-    # Failure posture (same as BEP-9889/9890): the extra bind must never fail
+    # Failure posture (same as BEP-9889): the extra bind must never fail
     # the republish. Rescue any broker error, log at error level (naming the
     # queue + exchange), and continue — the activejob bind from `super` already
     # makes the message deliverable for immediate jobs.
@@ -45,8 +47,13 @@ module AdvancedSneakersActiveJob
     def bind_queue_to_delivery_exchange(queue)
       delivery_exchange_name = ::AdvancedSneakersActiveJob::LeveledDelayedPublisher::DELIVERY_EXCHANGE
 
-      delivery_exchange = queue.channel.topic(delivery_exchange_name, durable: true)
-      queue.bind(delivery_exchange, routing_key: "#.#{queue.name}")
+      bind_channel = connection.create_channel
+      begin
+        bind_channel.topic(delivery_exchange_name, durable: true)
+        bind_channel.queue_bind(queue.name, delivery_exchange_name, routing_key: "#.#{queue.name}")
+      ensure
+        bind_channel.close if bind_channel.open?
+      end
     rescue StandardError => e
       logger.error do
         "AdvancedSneakersActiveJob::Publisher: failed to bind auto-created queue [#{queue.name}] " \
