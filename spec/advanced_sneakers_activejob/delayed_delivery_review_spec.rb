@@ -137,9 +137,6 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
 
     it 'keeps retrying under :leveled without growing the routing key past the AMQP limit',
        with_config: { delayed_delivery: :leveled, retry_delay_proc: ->(_count) { 1 } } do
-      pending 'defect: each retry prepends another 20 bit segments to the already bit-prefixed ' \
-              'routing key; at > 255 bytes amq-protocol raises RangeError and the message is never acked'
-
       leveled.publish('payload', routing_key: 'custom', headers: { 'delay' => 1 })
 
       key_lengths = []
@@ -150,6 +147,8 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
         expect { handler.error(info, properties, payload, error) }
           .not_to raise_error, "routing key lengths per delivery: #{key_lengths.inspect}"
       end
+
+      expect(key_lengths.uniq).to eq([levels * 2 + 'custom'.bytesize])
     end
 
     it 'counts the consumer-queue death across leveled retries (x-death survives dead-lettering)',
@@ -174,9 +173,6 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
 
     it 'delivers the retry when the callable flips to :legacy between enqueue and retry',
        with_config: { delayed_delivery: -> { :legacy }, retry_delay_proc: ->(_count) { 1 } } do
-      pending 'defect (predates #13, still reachable through a callable): the legacy retry ' \
-              'dead-letters into the direct activejob exchange with the bit-prefixed key, which no queue binds'
-
       leveled.publish('payload', routing_key: 'custom', headers: { 'delay' => 1 })
       info, properties, payload = next_delivery
       handler.error(info, properties, payload, error)

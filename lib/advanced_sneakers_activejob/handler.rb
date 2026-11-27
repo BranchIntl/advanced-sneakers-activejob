@@ -6,7 +6,7 @@ module AdvancedSneakersActiveJob
     def error(delivery_info, properties, message, error)
       params = properties.to_h
       params[:headers] = patch_headers(params[:headers] || {}, delivery_info, error)
-      params[:routing_key] = delivery_info.routing_key
+      params[:routing_key] = destination_routing_key(delivery_info)
 
       # Route through the adapter's selection logic so consumer-side retries
       # honor config.delayed_delivery (:legacy / :leveled / callable). The delay
@@ -21,6 +21,16 @@ module AdvancedSneakersActiveJob
     end
 
     private
+
+    # A message that came through the leveled topology carries the delay bits in front of the
+    # destination. Republishing that key would add another set of bits on each leveled retry,
+    # and the legacy delayed queue would dead-letter it with a key that no queue binds.
+    def destination_routing_key(delivery_info)
+      routing_key = delivery_info.routing_key
+      return routing_key unless delivery_info.exchange == LeveledDelayedPublisher::DELIVERY_EXCHANGE
+
+      routing_key.split('.', AdvancedSneakersActiveJob.leveled_delayed_publisher.levels + 1).last
+    end
 
     def patch_headers(headers, delivery_info, error)
       queue = queue_name(delivery_info)
