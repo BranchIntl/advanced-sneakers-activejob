@@ -151,19 +151,14 @@ describe 'Delayed delivery v0.8.0', :rabbitmq do
       expect(key_lengths.uniq).to eq([levels * 2 + 'custom'.bytesize])
     end
 
-    it 'counts the consumer-queue death across leveled retries (x-death survives dead-lettering)',
+    it 'counts the consumer-queue death across leveled retries (x-death-count survives dead-lettering)',
        with_config: { delayed_delivery: :leveled, retry_delay_proc: ->(_count) { 1 } } do
-      if connection.server_properties['version'].to_i >= 4
-        pending 'defect (predates #13): RabbitMQ 4.x drops client-set x-death rows on dead-lettering, so the ' \
-                'handler always computes count 1 and retries every retry_delay_proc.call(1) seconds without backoff'
-      end
-
       leveled.publish('payload', routing_key: 'custom', headers: { 'delay' => 1 })
 
       # Read the count before #error: the handler mutates the received headers in place.
       counts = Array.new(4) do |attempt|
         info, properties, payload = next_delivery
-        count = properties[:headers]['x-death'].find { |death| death['queue'] == 'custom' }&.fetch('count')
+        count = properties[:headers]['x-death-count']
         attempt < 3 ? handler.error(info, properties, payload, error) : consumer_channel.reject(info.delivery_tag)
         count
       end

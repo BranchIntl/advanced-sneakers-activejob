@@ -39,7 +39,7 @@ module AdvancedSneakersActiveJob
 
       track_error_in_headers(headers, error)
       track_death_in_headers(headers, queue, exchange, routing_key)
-      set_delay_in_headers(headers, delivery_info)
+      set_delay_in_headers(headers)
 
       headers
     end
@@ -51,20 +51,27 @@ module AdvancedSneakersActiveJob
       headers['x-first-death-reason'] ||= 'rejected'
       headers['x-death'] ||= []
 
-      if (death = death_header(headers, queue))
-        death['count'] += 1
+      # RabbitMQ 4.x drops x-death rows that a client publishes, so x-death-count carries the
+      # count across retries. The larger value keeps the count of a message that has only the
+      # x-death row from an older Handler.
+      death = death_header(headers, queue)
+      count = [headers['x-death-count'].to_i, death ? death['count'] : 0].max + 1
+      headers['x-death-count'] = count
+
+      if death
+        death['count'] = count
       else
-        headers['x-death'] << build_death_row(queue, exchange, routing_key)
+        headers['x-death'] << build_death_row(queue, exchange, routing_key, count)
       end
     end
 
-    def set_delay_in_headers(headers, delivery_info)
-      headers['delay'] = calculate_delay(headers, delivery_info)
+    def set_delay_in_headers(headers)
+      headers['delay'] = AdvancedSneakersActiveJob.config.retry_delay_proc.call(headers.fetch('x-death-count'))
     end
 
-    def build_death_row(queue, exchange, routing_key)
+    def build_death_row(queue, exchange, routing_key, count)
       {
-        'count' => 1,
+        'count' => count,
         'reason' => 'rejected',
         'queue' => queue,
         'time' => Time.now,
@@ -76,12 +83,6 @@ module AdvancedSneakersActiveJob
     def track_error_in_headers(headers, error)
       headers['x-last-error-name'] = error.class.name
       headers['x-last-error-details'] = Base64.encode64(ActiveSupport::Gzip.compress(error.full_message))
-    end
-
-    def calculate_delay(headers, delivery_info)
-      death_count = death_header(headers, queue_name(delivery_info)).fetch('count')
-
-      AdvancedSneakersActiveJob.config.retry_delay_proc.call(death_count)
     end
 
     def queue_name(delivery_info)
