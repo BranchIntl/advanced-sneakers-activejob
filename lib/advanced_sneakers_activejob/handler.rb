@@ -6,7 +6,7 @@ module AdvancedSneakersActiveJob
     def error(delivery_info, properties, message, error)
       params = properties.to_h
       params[:headers] = patch_headers(params[:headers] || {}, delivery_info, error)
-      params[:routing_key] = delivery_info.routing_key
+      params[:routing_key] = destination_routing_key(delivery_info)
 
       # Route through the adapter's selection logic so consumer-side retries
       # honor config.delayed_delivery (:legacy / :leveled / callable). The delay
@@ -22,6 +22,16 @@ module AdvancedSneakersActiveJob
 
     private
 
+    # A message that came through the leveled topology carries the delay bits in front of the
+    # destination. Republishing that key would add another set of bits on each leveled retry,
+    # and the legacy delayed queue would dead-letter it with a key that no queue binds.
+    def destination_routing_key(delivery_info)
+      routing_key = delivery_info.routing_key
+      return routing_key unless delivery_info.exchange == LeveledDelayedPublisher::DELIVERY_EXCHANGE
+
+      routing_key.split('.', AdvancedSneakersActiveJob.leveled_delayed_publisher.levels + 1).last
+    end
+
     def patch_headers(headers, delivery_info, error)
       queue = queue_name(delivery_info)
       exchange = delivery_info.exchange
@@ -29,7 +39,7 @@ module AdvancedSneakersActiveJob
 
       track_error_in_headers(headers, error)
       track_death_in_headers(headers, queue, exchange, routing_key)
-      set_delay_in_headers(headers, delivery_info)
+      set_delay_in_headers(headers)
 
       headers
     end
@@ -41,20 +51,27 @@ module AdvancedSneakersActiveJob
       headers['x-first-death-reason'] ||= 'rejected'
       headers['x-death'] ||= []
 
-      if (death = death_header(headers, queue))
-        death['count'] += 1
+      # RabbitMQ 4.x drops x-death rows that a client publishes, so x-death-count carries the
+      # count across retries. The larger value keeps the count of a message that has only the
+      # x-death row from an older Handler.
+      death = death_header(headers, queue)
+      count = [headers['x-death-count'].to_i, death ? death['count'] : 0].max + 1
+      headers['x-death-count'] = count
+
+      if death
+        death['count'] = count
       else
-        headers['x-death'] << build_death_row(queue, exchange, routing_key)
+        headers['x-death'] << build_death_row(queue, exchange, routing_key, count)
       end
     end
 
-    def set_delay_in_headers(headers, delivery_info)
-      headers['delay'] = calculate_delay(headers, delivery_info)
+    def set_delay_in_headers(headers)
+      headers['delay'] = AdvancedSneakersActiveJob.config.retry_delay_proc.call(headers.fetch('x-death-count'))
     end
 
-    def build_death_row(queue, exchange, routing_key)
+    def build_death_row(queue, exchange, routing_key, count)
       {
-        'count' => 1,
+        'count' => count,
         'reason' => 'rejected',
         'queue' => queue,
         'time' => Time.now,
@@ -66,12 +83,6 @@ module AdvancedSneakersActiveJob
     def track_error_in_headers(headers, error)
       headers['x-last-error-name'] = error.class.name
       headers['x-last-error-details'] = Base64.encode64(ActiveSupport::Gzip.compress(error.full_message))
-    end
-
-    def calculate_delay(headers, delivery_info)
-      death_count = death_header(headers, queue_name(delivery_info)).fetch('count')
-
-      AdvancedSneakersActiveJob.config.retry_delay_proc.call(death_count)
     end
 
     def queue_name(delivery_info)
