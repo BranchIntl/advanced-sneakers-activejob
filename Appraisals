@@ -1,20 +1,11 @@
 # frozen_string_literal: true
 
-appraise 'activejob-6.0.x' do
-  gem 'rails', '~> 6.0.3'
-  gem 'concurrent-ruby', '1.3.4'
-end
-
-appraise 'activejob-6.1.x' do
-  gem 'rails', '~> 6.1.0'
-  gem 'concurrent-ruby', '1.3.4'
-end
-
-appraise 'activejob-7.0.x' do
-  gem 'rails', '~> 7.0.0'
-  gem 'concurrent-ruby', '1.3.4'
-end
-
 appraise 'activejob-7.1.x' do
   gem 'rails', '~> 7.1.0'
+  # ActiveSupport 7.1 passes quirks_mode to JSON.generate and JSON.parse; json 3 rejects that keyword.
+  gem 'json', '< 3'
+end
+
+appraise 'activejob-8.1.x' do
+  gem 'rails', '~> 8.1.0'
 end

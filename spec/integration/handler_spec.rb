@@ -22,7 +22,7 @@ describe 'Handler', :rabbitmq do
   end
 
   context 'when job is failing' do
-    context 'when failure is handled by ActiveJob', if: ActiveJob.gem_version >= Gem::Version.new('5.1') do
+    context 'when failure is handled by ActiveJob' do
       subject do
         in_app_process(adapter: :advanced_sneakers) do
           CustomQueueJob.discard_on 'StandardError'
@@ -56,39 +56,36 @@ describe 'Handler', :rabbitmq do
       it 'handles job retries' do
         subject
 
-        if ActiveJob.gem_version >= Gem::Version.new('5.1')
-          expect_logs name: 'rails',
-                      to_include: [
-                        'Performing CustomQueueJob from AdvancedSneakers(custom) with arguments: "failing job"',
-                        'to [activejob-delayed] with routing_key [custom] and delay [3]',
-                        'Creating delayed queue'
-                      ],
-                      to_exclude: 'Performed CustomQueueJob from AdvancedSneakers(custom)'
-        else
-          expect_logs name: 'rails',
-                      to_include: [
-                        'Performing CustomQueueJob from AdvancedSneakers(custom) with arguments: "failing job"',
-                        'to [activejob-delayed] with routing_key [custom] and delay [3]',
-                        'Creating delayed queue'
-                      ]
-        end
+        expect_logs name: 'rails',
+                    to_include: [
+                      'Performing CustomQueueJob from AdvancedSneakers(custom) with arguments: "failing job"',
+                      'to [activejob-delayed] with routing_key [custom] and delay [3]',
+                      'Creating delayed queue'
+                    ],
+                    to_exclude: 'Performed CustomQueueJob from AdvancedSneakers(custom)'
       end
 
       it 'retries job with exponential backoff' do
         subject
-        sleep 0.1
 
-        expect(delayed_queues).to eq(['delayed:3'])
+        expect_delayed_queues(['delayed:3'])
 
         rabbitmq_messages('delayed:3', ackmode: 'reject_requeue_false') # simulate delayed message timeout
-        sleep 0.1
 
-        expect(delayed_queues).to eq(['delayed:3', 'delayed:30'])
+        expect_delayed_queues(['delayed:3', 'delayed:30'])
 
         rabbitmq_messages('delayed:30', ackmode: 'reject_requeue_false') # simulate delayed message timeout
-        sleep 0.1
 
-        expect(delayed_queues).to eq(['delayed:3', 'delayed:30', 'delayed:90'])
+        expect_delayed_queues(['delayed:3', 'delayed:30', 'delayed:90'])
+      end
+
+      # The consumer process declares each delayed queue on its own schedule; a fixed sleep is too short on slow CI runners.
+      def expect_delayed_queues(expected, wait: 5)
+        Timeout.timeout(wait) { sleep 0.1 until delayed_queues == expected }
+      rescue Timeout::Error
+        nil
+      ensure
+        expect(delayed_queues).to eq(expected)
       end
 
       def delayed_queues

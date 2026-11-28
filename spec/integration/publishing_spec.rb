@@ -362,80 +362,63 @@ describe 'Publishing', :rabbitmq do
       end
     end
 
-    if ActiveJob.gem_version >= Gem::Version.new('6.0') # https://github.com/rails/rails/pull/34376
-      it 'creates proper queues' do
-        expect do
-          subject
-        end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['awesome:custom', 'awesome:default'])
-      end
-
-      it 'messages are not lost' do
+    it 'creates proper queues' do
+      expect do
         subject
+      end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['awesome:custom', 'awesome:default'])
+    end
 
-        expect(rabbitmq_messages('awesome:default').first['payload']).to include('Application job')
-        expect(rabbitmq_messages('awesome:custom').first['payload']).to include('Custom queue job')
-      end
-    else
-      it 'creates proper queues' do
-        expect do
-          subject
-        end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['awesome:custom', 'default'])
-      end
+    it 'messages are not lost' do
+      subject
 
-      it 'messages are not lost' do
-        subject
-
-        expect(rabbitmq_messages('default').first['payload']).to include('Application job')
-        expect(rabbitmq_messages('awesome:custom').first['payload']).to include('Custom queue job')
-      end
+      expect(rabbitmq_messages('awesome:default').first['payload']).to include('Application job')
+      expect(rabbitmq_messages('awesome:custom').first['payload']).to include('Custom queue job')
     end
   end
 
-  if ActiveJob.gem_version >= Gem::Version.new('5.0')
-    context 'when there are ActiveJob classes with custom queue adapter' do
-      subject do
-        in_app_process(adapter: :advanced_sneakers) do
-          AdvancedSneakersActiveJob.configure { |c| c.handle_unrouted_messages = true }
+  context 'when there are ActiveJob classes with custom queue adapter' do
+    subject do
+      in_app_process(adapter: :advanced_sneakers) do
+        AdvancedSneakersActiveJob.configure { |c| c.handle_unrouted_messages = true }
 
-          class FooJob < ApplicationJob
-            self.queue_adapter = :async
+        class FooJob < ApplicationJob
+          self.queue_adapter = :async
 
-            queue_as :bar
-          end
-
-          FooJob.perform_later('Foo job')
-          CustomQueueJob.perform_later('Custom queue job')
+          queue_as :bar
         end
-      end
 
-      it 'creates queues for jobs with matching adapter' do
-        expect do
-          subject
-        end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['custom']) # no "bar"
+        FooJob.perform_later('Foo job')
+        CustomQueueJob.perform_later('Custom queue job')
       end
     end
 
-    context 'when advanced_sneakers is set as custom adapter' do
-      subject do
-        in_app_process(adapter: :inline) do
-          AdvancedSneakersActiveJob.configure { |c| c.handle_unrouted_messages = true }
+    it 'creates queues for jobs with matching adapter' do
+      expect do
+        subject
+      end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['custom']) # no "bar"
+    end
+  end
 
-          class FooJob < ApplicationJob
-            self.queue_adapter = :advanced_sneakers
+  context 'when advanced_sneakers is set as custom adapter' do
+    subject do
+      in_app_process(adapter: :inline) do
+        AdvancedSneakersActiveJob.configure { |c| c.handle_unrouted_messages = true }
 
-            queue_as :bar
-          end
+        class FooJob < ApplicationJob
+          self.queue_adapter = :advanced_sneakers
 
-          FooJob.perform_later('Foo job')
-          CustomQueueJob.perform_later('Custom queue job')
+          queue_as :bar
         end
-      end
 
-      it 'creates queues for jobs with matching adapter' do
-        expect do
-          subject
-        end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['bar']) # no "custom"
+        FooJob.perform_later('Foo job')
+        CustomQueueJob.perform_later('Custom queue job')
       end
+    end
+
+    it 'creates queues for jobs with matching adapter' do
+      expect do
+        subject
+      end.to change { rabbitmq_queues(columns: [:name]).map(&:name).sort }.from([]).to(['bar']) # no "custom"
     end
   end
 end

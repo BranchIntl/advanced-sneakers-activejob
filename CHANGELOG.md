@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased](https://github.com/BranchIntl/advanced-sneakers-activejob/compare/v0.8.0...HEAD)
 
+### Changed
+- Bump minimum Ruby version from 2.5 to 3.3
+- Bump minimum ActiveJob version from 6.0 to 7.1
+
+### Removed
+- Drop support for Ruby 2.5, 2.6, 2.7, 3.0, 3.1, and 3.2
+- Drop support for ActiveJob 6.0, 6.1, and 7.0
+
 
 ## [0.8.0](https://github.com/BranchIntl/advanced-sneakers-activejob/compare/v0.7.0...v0.8.0) - 2026-07-20
 

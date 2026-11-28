@@ -65,14 +65,9 @@ describe 'Consumers' do
         'AdvancedSneakersActiveJob::CustomMailersConsumer' => 'custom:mailers', # action mailer consumer
         'AdvancedSneakersActiveJob::CustomCustomConsumer' => 'custom:custom', # see CustomQueueJob in spec/apps/app/jobs
         'AdvancedSneakersActiveJob::CustomBazConsumer' => 'custom:baz', # baz queue consumer for FooJob and BarJob
-        'AdvancedSneakersActiveJob::CustomDynamicConsumer' => 'custom:dynamic' # dynamic queue consumer for DynamicQueueJob
+        'AdvancedSneakersActiveJob::CustomDynamicConsumer' => 'custom:dynamic', # dynamic queue consumer for DynamicQueueJob
+        'AdvancedSneakersActiveJob::CustomDefaultConsumer' => 'custom:default'
       }
-
-      if ActiveJob.gem_version >= Gem::Version.new('6.0') # https://github.com/rails/rails/pull/34376
-        expected_consumers['AdvancedSneakersActiveJob::CustomDefaultConsumer'] = 'custom:default'
-      else
-        expected_consumers['AdvancedSneakersActiveJob::DefaultConsumer'] = 'default'
-      end
 
       expect(subject.first).to eq(expected_consumers)
     end
@@ -150,73 +145,69 @@ describe 'Consumers' do
     end
   end
 
-  # Support for mailer specific queue name was added in Rails 7.1
-  # https://github.com/rails/rails/pull/47408
-  if ActiveJob.gem_version >= Gem::Version.new('7.1')
-    context 'when there are ActionMailer classes with queue defined' do
-      subject do
-        in_app_process(adapter: :advanced_sneakers) do
-          class FooMailer < ActionMailer::Base
-            self.deliver_later_queue_name = 'bar'
-          end
-
-          class BarMailer < ActionMailer::Base
-            self.deliver_later_queue_name = 'baz'
-          end
-
-          AdvancedSneakersActiveJob.configure { |c| c.activejob_workers_strategy = :only }
-
-          Sneakers::Worker::Classes.call.map { |consumer| [consumer.name, consumer.queue_name] }.to_h
+  context 'when there are ActionMailer classes with queue defined' do
+    subject do
+      in_app_process(adapter: :advanced_sneakers) do
+        class FooMailer < ActionMailer::Base
+          self.deliver_later_queue_name = 'bar'
         end
-      end
 
-      it 'are defined for queue from matching adapter only' do
-        expected_consumers = {
-          'AdvancedSneakersActiveJob::BarConsumer' => 'bar', # bar queue consumer for FooMailer
-          'AdvancedSneakersActiveJob::BazConsumer' => 'baz', # baz queue consumer for BarMailer
-          'AdvancedSneakersActiveJob::DefaultConsumer' => 'default', # default consumer
-          'AdvancedSneakersActiveJob::MailersConsumer' => 'mailers', # action mailer consumer
-          'AdvancedSneakersActiveJob::CustomConsumer' => 'custom', # see CustomQueueJob in spec/apps/app/jobs
-        }
+        class BarMailer < ActionMailer::Base
+          self.deliver_later_queue_name = 'baz'
+        end
 
-        expect(subject.first).to eq(expected_consumers)
+        AdvancedSneakersActiveJob.configure { |c| c.activejob_workers_strategy = :only }
+
+        Sneakers::Worker::Classes.call.map { |consumer| [consumer.name, consumer.queue_name] }.to_h
       end
     end
 
-    context 'when there are ActionMailer classes with custom delivery jobs' do
-      subject do
-        in_app_process(adapter: :advanced_sneakers) do
-          class CustomDeliveryJob < ActionMailer::MailDeliveryJob
-            self.queue_adapter = :async
+    it 'are defined for queue from matching adapter only' do
+      expected_consumers = {
+        'AdvancedSneakersActiveJob::BarConsumer' => 'bar', # bar queue consumer for FooMailer
+        'AdvancedSneakersActiveJob::BazConsumer' => 'baz', # baz queue consumer for BarMailer
+        'AdvancedSneakersActiveJob::DefaultConsumer' => 'default', # default consumer
+        'AdvancedSneakersActiveJob::MailersConsumer' => 'mailers', # action mailer consumer
+        'AdvancedSneakersActiveJob::CustomConsumer' => 'custom', # see CustomQueueJob in spec/apps/app/jobs
+      }
 
-            queue_as :bar
-          end
+      expect(subject.first).to eq(expected_consumers)
+    end
+  end
 
-          class FooMailer < ActionMailer::Base
-            self.delivery_job = CustomDeliveryJob
-            self.deliver_later_queue_name = 'bar'
-          end
+  context 'when there are ActionMailer classes with custom delivery jobs' do
+    subject do
+      in_app_process(adapter: :advanced_sneakers) do
+        class CustomDeliveryJob < ActionMailer::MailDeliveryJob
+          self.queue_adapter = :async
 
-          class BarMailer < ActionMailer::Base
-            self.deliver_later_queue_name = 'baz'
-          end
-
-          AdvancedSneakersActiveJob.configure { |c| c.activejob_workers_strategy = :only }
-
-          Sneakers::Worker::Classes.call.map { |consumer| [consumer.name, consumer.queue_name] }.to_h
+          queue_as :bar
         end
-      end
 
-      it 'are defined for queue from matching adapter only' do
-        expected_consumers = {
-          'AdvancedSneakersActiveJob::BazConsumer' => 'baz', # baz queue consumer for BarMailer
-          'AdvancedSneakersActiveJob::DefaultConsumer' => 'default', # default consumer
-          'AdvancedSneakersActiveJob::MailersConsumer' => 'mailers', # action mailer consumer
-          'AdvancedSneakersActiveJob::CustomConsumer' => 'custom', # see CustomQueueJob in spec/apps/app/jobs
-        }
+        class FooMailer < ActionMailer::Base
+          self.delivery_job = CustomDeliveryJob
+          self.deliver_later_queue_name = 'bar'
+        end
 
-        expect(subject.first).to eq(expected_consumers)
+        class BarMailer < ActionMailer::Base
+          self.deliver_later_queue_name = 'baz'
+        end
+
+        AdvancedSneakersActiveJob.configure { |c| c.activejob_workers_strategy = :only }
+
+        Sneakers::Worker::Classes.call.map { |consumer| [consumer.name, consumer.queue_name] }.to_h
       end
+    end
+
+    it 'are defined for queue from matching adapter only' do
+      expected_consumers = {
+        'AdvancedSneakersActiveJob::BazConsumer' => 'baz', # baz queue consumer for BarMailer
+        'AdvancedSneakersActiveJob::DefaultConsumer' => 'default', # default consumer
+        'AdvancedSneakersActiveJob::MailersConsumer' => 'mailers', # action mailer consumer
+        'AdvancedSneakersActiveJob::CustomConsumer' => 'custom', # see CustomQueueJob in spec/apps/app/jobs
+      }
+
+      expect(subject.first).to eq(expected_consumers)
     end
   end
 end
