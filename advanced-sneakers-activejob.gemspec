@@ -23,19 +23,17 @@ Gem::Specification.new do |spec|
 
   spec.files = Dir['CHANGELOG.md', 'LICENSE.txt', 'README.md', 'lib/**/*']
 
-  spec.required_ruby_version = '>= 2.5'
+  spec.required_ruby_version = '>= 3.3'
 
   spec.require_paths = ['lib']
 
-  spec.add_dependency 'activejob', '>= 6.0'
+  spec.add_dependency 'activejob', '>= 7.1'
   spec.add_dependency 'bunny-publisher', '~> 0.2.0'
   spec.add_dependency 'kicks', '~> 3.0'
 
   spec.add_development_dependency 'appraisal', '~> 2.5.0'
   spec.add_development_dependency 'bundler'
-  # rabbitmq_http_api_client 1.x pulls faraday 1.x, which passes JSON.parse options positionally; json 3 rejects that.
-  spec.add_development_dependency 'json', '< 3'
   spec.add_development_dependency 'pry-byebug'
-  spec.add_development_dependency 'rabbitmq_http_api_client', '~> 1.13'
+  spec.add_development_dependency 'rabbitmq_http_api_client', '~> 3.2'
   spec.add_development_dependency 'rspec', '~> 3.0'
 end
